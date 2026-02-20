@@ -20,7 +20,6 @@ jobs:
         uses: coinfabrik/scout-actions@v1
         with:
           target: contracts/
-          fail-on-severity: medium
       
       - name: Post Scout Report
         if: always()

@@ -12,11 +12,8 @@ impl HelloContract {
         name
     }
 
-    // hello function: simply returns a fixed greeting for testing
-    pub fn hello(env: Env, _name: String) -> String {
-        // For testing, we just return "Hello" + name as separate strings
-        // Or just return the name for simplicity
-        String::from_str(&env, "Hello, ") // currently just returns "Hello, "
+    pub fn hello(_env: Env, name: String) -> String {
+        name
     }
 }
 
@@ -29,9 +26,8 @@ mod test {
     fn test_hello() {
         let env = Env::default();
         let name = String::from_str(&env, "Alice");
-        let result = HelloContract::hello(env.clone(), name);
-        let expected = String::from_str(&env, "Hello, ");
-        assert_eq!(result, expected);
+        let result = HelloContract::hello(env.clone(), name.clone());
+        assert_eq!(result, name);
     }
 
     #[test]

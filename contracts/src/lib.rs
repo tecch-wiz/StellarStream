@@ -4,6 +4,9 @@ pub mod math;
 mod test;
 mod types;
 
+#[cfg(test)]
+mod precision_test;
+
 use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Vec};
 pub use types::{DataKey, Stream, StreamRequest};
 
@@ -218,15 +221,16 @@ impl StellarStream {
         }
 
         let now = env.ledger().timestamp();
-        let total_unlocked = math::calculate_unlocked(
+
+        // Use precision-safe calculation that handles final withdrawal correctly
+        let withdrawable_amount = math::calculate_withdrawable(
             stream.amount,
+            stream.withdrawn_amount,
             stream.start_time,
             stream.cliff_time,
             stream.end_time,
             now,
         );
-
-        let withdrawable_amount = total_unlocked - stream.withdrawn_amount;
 
         if withdrawable_amount <= 0 {
             panic!("No funds available to withdraw at this time");

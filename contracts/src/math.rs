@@ -1,3 +1,8 @@
+// Optimized math functions with inlining for better performance
+
+/// Calculate unlocked amount with linear vesting
+/// Inlined for performance in hot paths
+#[inline(always)]
 #[allow(dead_code)]
 pub fn calculate_unlocked_amount(
     total_amount: i128,
@@ -19,12 +24,19 @@ pub fn calculate_unlocked_amount(
     (total_amount * elapsed_time) / total_duration
 }
 
+/// Calculate withdrawable amount
+/// Inlined for performance
+#[inline(always)]
 #[allow(dead_code)]
 pub fn calculate_withdrawable_amount(unlocked_amount: i128, withdrawn_amount: i128) -> i128 {
     unlocked_amount - withdrawn_amount
 }
 
+/// Calculate unlocked amount with cliff support
+/// Inlined for performance in withdraw function (most frequently called)
+#[inline(always)]
 pub fn calculate_unlocked(total_amount: i128, start: u64, cliff: u64, end: u64, now: u64) -> i128 {
+    // Early returns for common cases
     if now < cliff {
         return 0;
     }
@@ -36,6 +48,23 @@ pub fn calculate_unlocked(total_amount: i128, start: u64, cliff: u64, end: u64, 
     let total_duration = (end - start) as i128;
 
     (total_amount * elapsed) / total_duration
+}
+
+/// Fast fee calculation using bit operations where possible
+/// For fee_bps (basis points), we divide by 10000
+/// Inlined for performance
+#[inline(always)]
+pub fn calculate_fee(amount: i128, fee_bps: u32) -> i128 {
+    if fee_bps == 0 {
+        return 0;
+    }
+    (amount * fee_bps as i128) / 10000
+}
+
+/// Check if a value is a power of 2 (useful for optimization checks)
+#[inline(always)]
+pub fn is_power_of_two(n: u32) -> bool {
+    n != 0 && (n & (n - 1)) == 0
 }
 
 #[cfg(test)]

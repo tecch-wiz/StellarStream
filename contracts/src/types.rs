@@ -73,4 +73,6 @@ pub enum DataKey {
     Treasury,
     IsPaused,
     ReentrancyLock,
+    ContractVersion,        // Tracks current contract version
+    MigrationExecuted(u32), // Tracks which migrations have been executed
 }

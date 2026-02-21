@@ -133,12 +133,11 @@ fn test_transfer_receiver() {
     let new_receiver = Address::generate(&ctx.env);
 
     ctx.token.mint(&sender, &1000);
-    let stream_id = ctx
-        .client
-        .create_stream(&sender, &old_receiver, &ctx.token_id, &1000, &0, &1000);
+    let stream_id =
+        ctx.client
+            .create_stream(&sender, &old_receiver, &ctx.token_id, &1000, &0, &1000);
 
-    ctx.client
-        .transfer_receiver(&stream_id, &new_receiver);
+    ctx.client.transfer_receiver(&stream_id, &new_receiver);
 
     ctx.env.ledger().set(soroban_sdk::testutils::LedgerInfo {
         timestamp: 500,
@@ -167,12 +166,11 @@ fn test_old_receiver_cannot_withdraw_after_transfer() {
     let new_receiver = Address::generate(&ctx.env);
 
     ctx.token.mint(&sender, &1000);
-    let stream_id = ctx
-        .client
-        .create_stream(&sender, &old_receiver, &ctx.token_id, &1000, &0, &1000);
+    let stream_id =
+        ctx.client
+            .create_stream(&sender, &old_receiver, &ctx.token_id, &1000, &0, &1000);
 
-    ctx.client
-        .transfer_receiver(&stream_id, &new_receiver);
+    ctx.client.transfer_receiver(&stream_id, &new_receiver);
 
     ctx.env.ledger().set(soroban_sdk::testutils::LedgerInfo {
         timestamp: 500,

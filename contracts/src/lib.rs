@@ -1,40 +1,540 @@
 #![no_std]
+#![allow(clippy::too_many_arguments)]
 
-use soroban_sdk::{contract, contractimpl, Env, String};
+mod errors;
+mod storage;
+mod types;
+
+use errors::Error;
+use soroban_sdk::{contract, contractimpl, token, Address, Env, Vec};
+use storage::{PROPOSAL_COUNT, STREAM_COUNT};
+use types::{Stream, StreamProposal};
 
 #[contract]
-pub struct HelloContract;
+pub struct StellarStreamContract;
 
 #[contractimpl]
-impl HelloContract {
-    // init function
-    pub fn init(_env: Env, name: String) -> String {
-        name
+impl StellarStreamContract {
+    pub fn create_proposal(
+        env: Env,
+        sender: Address,
+        receiver: Address,
+        token: Address,
+        total_amount: i128,
+        start_time: u64,
+        end_time: u64,
+        required_approvals: u32,
+        deadline: u64,
+    ) -> Result<u64, Error> {
+        sender.require_auth();
+
+        if start_time >= end_time {
+            return Err(Error::InvalidTimeRange);
+        }
+        if total_amount <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+        if required_approvals == 0 {
+            return Err(Error::InvalidApprovalThreshold);
+        }
+        if deadline <= env.ledger().timestamp() {
+            return Err(Error::ProposalExpired);
+        }
+
+        let proposal_id: u64 = env.storage().instance().get(&PROPOSAL_COUNT).unwrap_or(0);
+        let next_id = proposal_id + 1;
+
+        let proposal = StreamProposal {
+            sender: sender.clone(),
+            receiver,
+            token,
+            total_amount,
+            start_time,
+            end_time,
+            approvers: Vec::new(&env),
+            required_approvals,
+            deadline,
+            executed: false,
+        };
+
+        env.storage()
+            .instance()
+            .set(&(PROPOSAL_COUNT, proposal_id), &proposal);
+        env.storage().instance().set(&PROPOSAL_COUNT, &next_id);
+
+        Ok(proposal_id)
     }
 
-    pub fn hello(_env: Env, name: String) -> String {
-        name
+    pub fn approve_proposal(env: Env, proposal_id: u64, approver: Address) -> Result<(), Error> {
+        approver.require_auth();
+
+        let key = (PROPOSAL_COUNT, proposal_id);
+        let mut proposal: StreamProposal = env
+            .storage()
+            .instance()
+            .get(&key)
+            .ok_or(Error::ProposalNotFound)?;
+
+        if proposal.executed {
+            return Err(Error::ProposalAlreadyExecuted);
+        }
+        if env.ledger().timestamp() > proposal.deadline {
+            return Err(Error::ProposalExpired);
+        }
+
+        for existing_approver in proposal.approvers.iter() {
+            if existing_approver == approver {
+                return Err(Error::AlreadyApproved);
+            }
+        }
+
+        proposal.approvers.push_back(approver);
+        let approval_count = proposal.approvers.len();
+
+        if approval_count >= proposal.required_approvals {
+            proposal.executed = true;
+            env.storage().instance().set(&key, &proposal);
+            Self::execute_proposal(env, proposal)?;
+        } else {
+            env.storage().instance().set(&key, &proposal);
+        }
+
+        Ok(())
+    }
+
+    fn execute_proposal(env: Env, proposal: StreamProposal) -> Result<u64, Error> {
+        let token_client = token::Client::new(&env, &proposal.token);
+        token_client.transfer(
+            &proposal.sender,
+            &env.current_contract_address(),
+            &proposal.total_amount,
+        );
+
+        let stream_id: u64 = env.storage().instance().get(&STREAM_COUNT).unwrap_or(0);
+        let next_id = stream_id + 1;
+
+        let stream = Stream {
+            sender: proposal.sender,
+            receiver: proposal.receiver,
+            token: proposal.token,
+            total_amount: proposal.total_amount,
+            start_time: proposal.start_time,
+            end_time: proposal.end_time,
+            withdrawn: 0,
+            cancelled: false,
+        };
+
+        env.storage()
+            .instance()
+            .set(&(STREAM_COUNT, stream_id), &stream);
+        env.storage().instance().set(&STREAM_COUNT, &next_id);
+
+        Ok(stream_id)
+    }
+
+    pub fn create_stream(
+        env: Env,
+        sender: Address,
+        receiver: Address,
+        token: Address,
+        total_amount: i128,
+        start_time: u64,
+        end_time: u64,
+    ) -> Result<u64, Error> {
+        sender.require_auth();
+
+        if start_time >= end_time {
+            return Err(Error::InvalidTimeRange);
+        }
+        if total_amount <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+
+        let token_client = token::Client::new(&env, &token);
+        token_client.transfer(&sender, &env.current_contract_address(), &total_amount);
+
+        let stream_id: u64 = env.storage().instance().get(&STREAM_COUNT).unwrap_or(0);
+        let next_id = stream_id + 1;
+
+        let stream = Stream {
+            sender,
+            receiver,
+            token,
+            total_amount,
+            start_time,
+            end_time,
+            withdrawn: 0,
+            cancelled: false,
+        };
+
+        env.storage()
+            .instance()
+            .set(&(STREAM_COUNT, stream_id), &stream);
+        env.storage().instance().set(&STREAM_COUNT, &next_id);
+
+        Ok(stream_id)
+    }
+
+    pub fn withdraw(env: Env, stream_id: u64, receiver: Address) -> Result<i128, Error> {
+        receiver.require_auth();
+
+        let key = (STREAM_COUNT, stream_id);
+        let mut stream: Stream = env
+            .storage()
+            .instance()
+            .get(&key)
+            .ok_or(Error::StreamNotFound)?;
+
+        if stream.receiver != receiver {
+            return Err(Error::Unauthorized);
+        }
+        if stream.cancelled {
+            return Err(Error::AlreadyCancelled);
+        }
+
+        let current_time = env.ledger().timestamp();
+        let unlocked = Self::calculate_unlocked(&stream, current_time);
+        let withdrawable = unlocked - stream.withdrawn;
+
+        if withdrawable <= 0 {
+            return Err(Error::InsufficientBalance);
+        }
+
+        stream.withdrawn += withdrawable;
+        env.storage().instance().set(&key, &stream);
+
+        let token_client = token::Client::new(&env, &stream.token);
+        token_client.transfer(&env.current_contract_address(), &receiver, &withdrawable);
+
+        Ok(withdrawable)
+    }
+
+    pub fn cancel(env: Env, stream_id: u64, caller: Address) -> Result<(), Error> {
+        caller.require_auth();
+
+        let key = (STREAM_COUNT, stream_id);
+        let mut stream: Stream = env
+            .storage()
+            .instance()
+            .get(&key)
+            .ok_or(Error::StreamNotFound)?;
+
+        if stream.sender != caller && stream.receiver != caller {
+            return Err(Error::Unauthorized);
+        }
+        if stream.cancelled {
+            return Err(Error::AlreadyCancelled);
+        }
+
+        let current_time = env.ledger().timestamp();
+        let unlocked = Self::calculate_unlocked(&stream, current_time);
+        let to_receiver = unlocked - stream.withdrawn;
+        let to_sender = stream.total_amount - unlocked;
+
+        stream.cancelled = true;
+        stream.withdrawn = unlocked;
+        env.storage().instance().set(&key, &stream);
+
+        let token_client = token::Client::new(&env, &stream.token);
+        if to_receiver > 0 {
+            token_client.transfer(
+                &env.current_contract_address(),
+                &stream.receiver,
+                &to_receiver,
+            );
+        }
+        if to_sender > 0 {
+            token_client.transfer(&env.current_contract_address(), &stream.sender, &to_sender);
+        }
+
+        Ok(())
+    }
+
+    pub fn get_stream(env: Env, stream_id: u64) -> Result<Stream, Error> {
+        env.storage()
+            .instance()
+            .get(&(STREAM_COUNT, stream_id))
+            .ok_or(Error::StreamNotFound)
+    }
+
+    pub fn get_proposal(env: Env, proposal_id: u64) -> Result<StreamProposal, Error> {
+        env.storage()
+            .instance()
+            .get(&(PROPOSAL_COUNT, proposal_id))
+            .ok_or(Error::ProposalNotFound)
+    }
+
+    fn calculate_unlocked(stream: &Stream, current_time: u64) -> i128 {
+        if current_time <= stream.start_time {
+            return 0;
+        }
+        if current_time >= stream.end_time {
+            return stream.total_amount;
+        }
+
+        let elapsed = (current_time - stream.start_time) as i128;
+        let duration = (stream.end_time - stream.start_time) as i128;
+        (stream.total_amount * elapsed) / duration
     }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
-    use soroban_sdk::Env;
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger},
+        token::{StellarAssetClient, TokenClient},
+        Address, Env,
+    };
 
-    #[test]
-    fn test_hello() {
-        let env = Env::default();
-        let name = String::from_str(&env, "Alice");
-        let result = HelloContract::hello(env.clone(), name.clone());
-        assert_eq!(result, name);
+    fn create_token_contract<'a>(env: &Env, admin: &Address) -> (Address, TokenClient<'a>) {
+        let contract_id = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        (contract_id.clone(), TokenClient::new(env, &contract_id))
     }
 
     #[test]
-    fn test_init() {
+    fn test_create_proposal() {
         let env = Env::default();
-        let name = String::from_str(&env, "Bob");
-        let result = HelloContract::init(env.clone(), name.clone());
-        assert_eq!(result, name);
+        env.mock_all_auths();
+        env.ledger().with_mut(|li| li.timestamp = 50);
+
+        let contract_id = env.register(StellarStreamContract, ());
+        let client = StellarStreamContractClient::new(&env, &contract_id);
+
+        let sender = Address::generate(&env);
+        let receiver = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let (token_id, _) = create_token_contract(&env, &admin);
+
+        let proposal_id =
+            client.create_proposal(&sender, &receiver, &token_id, &1000, &100, &200, &2, &1000);
+
+        assert_eq!(proposal_id, 0);
+    }
+
+    #[test]
+    fn test_approve_proposal() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        env.ledger().with_mut(|li| li.timestamp = 50);
+
+        let contract_id = env.register(StellarStreamContract, ());
+        let client = StellarStreamContractClient::new(&env, &contract_id);
+
+        let sender = Address::generate(&env);
+        let receiver = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let (token_id, _) = create_token_contract(&env, &admin);
+
+        let token_admin_client = StellarAssetClient::new(&env, &token_id);
+        token_admin_client.mint(&sender, &10000);
+
+        let approver1 = Address::generate(&env);
+        let approver2 = Address::generate(&env);
+
+        let proposal_id =
+            client.create_proposal(&sender, &receiver, &token_id, &1000, &100, &200, &2, &1000);
+
+        client.approve_proposal(&proposal_id, &approver1);
+
+        let proposal = client.get_proposal(&proposal_id);
+        assert_eq!(proposal.approvers.len(), 1);
+        assert!(!proposal.executed);
+
+        client.approve_proposal(&proposal_id, &approver2);
+
+        let proposal = client.get_proposal(&proposal_id);
+        assert_eq!(proposal.approvers.len(), 2);
+        assert!(proposal.executed);
+    }
+
+    #[test]
+    fn test_duplicate_approval_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|li| li.timestamp = 50);
+
+        let contract_id = env.register(StellarStreamContract, ());
+        let client = StellarStreamContractClient::new(&env, &contract_id);
+
+        let sender = Address::generate(&env);
+        let receiver = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let (token_id, _) = create_token_contract(&env, &admin);
+
+        let approver = Address::generate(&env);
+
+        let proposal_id =
+            client.create_proposal(&sender, &receiver, &token_id, &1000, &100, &200, &2, &1000);
+
+        client.approve_proposal(&proposal_id, &approver);
+        let result = client.try_approve_proposal(&proposal_id, &approver);
+
+        assert_eq!(result, Err(Ok(Error::AlreadyApproved)));
+    }
+
+    #[test]
+    fn test_proposal_not_found() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(StellarStreamContract, ());
+        let client = StellarStreamContractClient::new(&env, &contract_id);
+
+        let approver = Address::generate(&env);
+        let result = client.try_approve_proposal(&999, &approver);
+
+        assert_eq!(result, Err(Ok(Error::ProposalNotFound)));
+    }
+
+    #[test]
+    fn test_invalid_time_range() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(StellarStreamContract, ());
+        let client = StellarStreamContractClient::new(&env, &contract_id);
+
+        let sender = Address::generate(&env);
+        let receiver = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let (token_id, _) = create_token_contract(&env, &admin);
+
+        let result =
+            client.try_create_proposal(&sender, &receiver, &token_id, &1000, &200, &100, &2, &1000);
+
+        assert_eq!(result, Err(Ok(Error::InvalidTimeRange)));
+    }
+
+    #[test]
+    fn test_invalid_amount() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(StellarStreamContract, ());
+        let client = StellarStreamContractClient::new(&env, &contract_id);
+
+        let sender = Address::generate(&env);
+        let receiver = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let (token_id, _) = create_token_contract(&env, &admin);
+
+        let result =
+            client.try_create_proposal(&sender, &receiver, &token_id, &0, &100, &200, &2, &1000);
+
+        assert_eq!(result, Err(Ok(Error::InvalidAmount)));
+    }
+
+    #[test]
+    fn test_invalid_approval_threshold() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(StellarStreamContract, ());
+        let client = StellarStreamContractClient::new(&env, &contract_id);
+
+        let sender = Address::generate(&env);
+        let receiver = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let (token_id, _) = create_token_contract(&env, &admin);
+
+        let result =
+            client.try_create_proposal(&sender, &receiver, &token_id, &1000, &100, &200, &0, &1000);
+
+        assert_eq!(result, Err(Ok(Error::InvalidApprovalThreshold)));
+    }
+
+    #[test]
+    fn test_create_direct_stream() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+
+        let contract_id = env.register(StellarStreamContract, ());
+        let client = StellarStreamContractClient::new(&env, &contract_id);
+
+        let sender = Address::generate(&env);
+        let receiver = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let (token_id, _) = create_token_contract(&env, &admin);
+
+        let token_admin_client = StellarAssetClient::new(&env, &token_id);
+        token_admin_client.mint(&sender, &10000);
+
+        let stream_id = client.create_stream(&sender, &receiver, &token_id, &1000, &100, &200);
+
+        assert_eq!(stream_id, 0);
+
+        let stream = client.get_stream(&stream_id);
+        assert_eq!(stream.total_amount, 1000);
+        assert!(!stream.cancelled);
+    }
+
+    #[test]
+    fn test_three_of_five_multisig() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        env.ledger().with_mut(|li| li.timestamp = 50);
+
+        let contract_id = env.register(StellarStreamContract, ());
+        let client = StellarStreamContractClient::new(&env, &contract_id);
+
+        let sender = Address::generate(&env);
+        let receiver = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let (token_id, _) = create_token_contract(&env, &admin);
+
+        let token_admin_client = StellarAssetClient::new(&env, &token_id);
+        token_admin_client.mint(&sender, &100000);
+
+        let proposal_id =
+            client.create_proposal(&sender, &receiver, &token_id, &50000, &100, &200, &3, &1000);
+
+        let approver1 = Address::generate(&env);
+        let approver2 = Address::generate(&env);
+        let approver3 = Address::generate(&env);
+
+        client.approve_proposal(&proposal_id, &approver1);
+        let proposal = client.get_proposal(&proposal_id);
+        assert!(!proposal.executed);
+
+        client.approve_proposal(&proposal_id, &approver2);
+        let proposal = client.get_proposal(&proposal_id);
+        assert!(!proposal.executed);
+
+        client.approve_proposal(&proposal_id, &approver3);
+        let proposal = client.get_proposal(&proposal_id);
+        assert!(proposal.executed);
+        assert_eq!(proposal.approvers.len(), 3);
+    }
+
+    #[test]
+    fn test_approve_already_executed_proposal() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        env.ledger().with_mut(|li| li.timestamp = 50);
+
+        let contract_id = env.register(StellarStreamContract, ());
+        let client = StellarStreamContractClient::new(&env, &contract_id);
+
+        let sender = Address::generate(&env);
+        let receiver = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let (token_id, _) = create_token_contract(&env, &admin);
+
+        let token_admin_client = StellarAssetClient::new(&env, &token_id);
+        token_admin_client.mint(&sender, &10000);
+
+        let proposal_id =
+            client.create_proposal(&sender, &receiver, &token_id, &1000, &100, &200, &1, &1000);
+
+        let approver1 = Address::generate(&env);
+        client.approve_proposal(&proposal_id, &approver1);
+
+        let approver2 = Address::generate(&env);
+        let result = client.try_approve_proposal(&proposal_id, &approver2);
+
+        assert_eq!(result, Err(Ok(Error::ProposalAlreadyExecuted)));
     }
 }

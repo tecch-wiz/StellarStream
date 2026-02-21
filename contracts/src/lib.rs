@@ -7,6 +7,9 @@ mod types;
 use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env};
 pub use types::{DataKey, Stream};
 
+const THRESHOLD: u32 = 518400; // ~30 days
+const LIMIT: u32 = 1036800; // ~60 days
+
 #[contract]
 pub struct StellarStream;
 
@@ -23,6 +26,13 @@ impl StellarStream {
     }
 
     pub fn update_fee(env: Env, admin: Address, fee_bps: u32) {
+    pub fn initialize(env: Env, admin: Address) {
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().instance().set(&DataKey::IsPaused, &false);
+    }
+
+    pub fn set_pause(env: Env, admin: Address, paused: bool) {
         admin.require_auth();
         let stored_admin: Address = env
             .storage()
@@ -38,6 +48,23 @@ impl StellarStream {
         env.storage().instance().set(&DataKey::FeeBps, &fee_bps);
     }
 
+            panic!("Unauthorized: Only admin can pause");
+        }
+        env.storage().instance().set(&DataKey::IsPaused, &paused);
+    }
+
+    fn check_not_paused(env: &Env) {
+        let is_paused: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::IsPaused)
+            .unwrap_or(false);
+        if is_paused {
+            panic!("Contract is paused");
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn create_stream(
         env: Env,
         sender: Address,
@@ -45,12 +72,17 @@ impl StellarStream {
         token: Address,
         amount: i128,
         start_time: u64,
+        cliff_time: u64,
         end_time: u64,
     ) -> u64 {
+        Self::check_not_paused(&env);
         sender.require_auth();
 
         if end_time <= start_time {
             panic!("End time must be after start time");
+        }
+        if cliff_time < start_time || cliff_time >= end_time {
+            panic!("Cliff time must be between start and end time");
         }
         if amount <= 0 {
             panic!("Amount must be greater than zero");
@@ -79,21 +111,24 @@ impl StellarStream {
             .unwrap_or(0);
         stream_id += 1;
         env.storage().instance().set(&DataKey::StreamId, &stream_id);
+        env.storage().instance().extend_ttl(THRESHOLD, LIMIT);
 
-        // 5. State Management: Populate the Stream struct
         let stream = Stream {
             sender: sender.clone(),
             receiver,
             token,
             amount: principal,
             start_time,
+            cliff_time,
             end_time,
             withdrawn_amount: 0,
         };
 
+        let stream_key = DataKey::Stream(stream_id);
+        env.storage().persistent().set(&stream_key, &stream);
         env.storage()
             .persistent()
-            .set(&DataKey::Stream(stream_id), &stream);
+            .extend_ttl(&stream_key, THRESHOLD, LIMIT);
 
         env.events()
             .publish((symbol_short!("create"), sender), stream_id);
@@ -102,37 +137,35 @@ impl StellarStream {
     }
 
     pub fn withdraw(env: Env, stream_id: u64, receiver: Address) -> i128 {
-        // 1. Auth: Only the receiver can trigger this withdrawal
+        Self::check_not_paused(&env);
         receiver.require_auth();
 
-        // 2. Fetch the Stream: Retrieve from Persistent storage
+        let stream_key = DataKey::Stream(stream_id);
         let mut stream: Stream = env
             .storage()
             .persistent()
-            .get(&DataKey::Stream(stream_id))
-            .unwrap_or_else(|| panic!("Stream does not exist"));
+            .get(&stream_key)
+            .expect("Stream does not exist");
 
-        // 3. Security: Ensure the caller is the actual receiver of this stream
         if receiver != stream.receiver {
             panic!("Unauthorized: You are not the receiver of this stream");
         }
 
-        // 4. Time Calculation: Get current ledger time
         let now = env.ledger().timestamp();
+        let total_unlocked = math::calculate_unlocked(
+            stream.amount,
+            stream.start_time,
+            stream.cliff_time,
+            stream.end_time,
+            now,
+        );
 
-        // 5. Math Logic: Calculate total unlocked amount based on time
-        // We pass the stream details to our math module
-        let total_unlocked =
-            math::calculate_unlocked(stream.amount, stream.start_time, stream.end_time, now);
-
-        // 6. Calculate Withdrawable: (Unlocked so far) - (Already withdrawn)
         let withdrawable_amount = total_unlocked - stream.withdrawn_amount;
 
         if withdrawable_amount <= 0 {
             panic!("No funds available to withdraw at this time");
         }
 
-        // 7. Token Transfer: Move funds from contract to receiver
         let token_client = token::Client::new(&env, &stream.token);
         token_client.transfer(
             &env.current_contract_address(),
@@ -140,13 +173,12 @@ impl StellarStream {
             &withdrawable_amount,
         );
 
-        // 8. Update State: Increment the withdrawn_amount and save back to storage
         stream.withdrawn_amount += withdrawable_amount;
+        env.storage().persistent().set(&stream_key, &stream);
         env.storage()
             .persistent()
-            .set(&DataKey::Stream(stream_id), &stream);
+            .extend_ttl(&stream_key, THRESHOLD, LIMIT);
 
-        // 9. Emit Event
         env.events().publish(
             (symbol_short!("withdraw"), receiver),
             (stream_id, withdrawable_amount),
@@ -156,39 +188,36 @@ impl StellarStream {
     }
 
     pub fn cancel_stream(env: Env, stream_id: u64) {
-        // 1. Fetch the Stream first to identify the sender
+        Self::check_not_paused(&env);
+        let stream_key = DataKey::Stream(stream_id);
         let stream: Stream = env
             .storage()
             .persistent()
-            .get(&DataKey::Stream(stream_id))
-            .unwrap_or_else(|| panic!("Stream does not exist"));
+            .get(&stream_key)
+            .expect("Stream does not exist");
 
-        // 2. Auth: Only the original sender can cancel the stream
         stream.sender.require_auth();
 
         let now = env.ledger().timestamp();
 
-        // 3. Validation: If the stream is already finished, there's nothing to cancel
         if now >= stream.end_time {
             panic!("Stream has already completed and cannot be cancelled");
         }
 
-        // 4. Calculate Final Split
-        // Total Unlocked is what the receiver is entitled to up to this second
-        let total_unlocked =
-            math::calculate_unlocked(stream.amount, stream.start_time, stream.end_time, now);
+        let total_unlocked = math::calculate_unlocked(
+            stream.amount,
+            stream.start_time,
+            stream.cliff_time,
+            stream.end_time,
+            now,
+        );
 
-        // Receiver gets: (What they are owed now) - (What they already took)
         let withdrawable_to_receiver = total_unlocked - stream.withdrawn_amount;
-
-        // Sender gets: (Original Total) - (Total Unlocked for receiver)
         let refund_to_sender = stream.amount - total_unlocked;
 
         let token_client = token::Client::new(&env, &stream.token);
         let contract_address = env.current_contract_address();
 
-        // 5. Execute Payouts
-        // Step 1: Pay the receiver their final piece of the pie
         if withdrawable_to_receiver > 0 {
             token_client.transfer(
                 &contract_address,
@@ -197,18 +226,20 @@ impl StellarStream {
             );
         }
 
-        // Step 2: Refund the remaining balance to the sender
         if refund_to_sender > 0 {
             token_client.transfer(&contract_address, &stream.sender, &refund_to_sender);
         }
 
-        // 6. Cleanup: Remove from Persistent storage to save ledger space and prevent re-entry
-        env.storage()
-            .persistent()
-            .remove(&DataKey::Stream(stream_id));
+        env.storage().persistent().remove(&stream_key);
 
-        // 7. Emit Event
         env.events()
             .publish((symbol_short!("cancel"), stream_id), stream.sender);
+    }
+
+    pub fn extend_stream_ttl(env: Env, stream_id: u64) {
+        let stream_key = DataKey::Stream(stream_id);
+        env.storage()
+            .persistent()
+            .extend_ttl(&stream_key, THRESHOLD, LIMIT);
     }
 }

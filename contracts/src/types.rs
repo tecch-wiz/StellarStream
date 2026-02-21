@@ -12,6 +12,9 @@ pub struct Stream {
     pub withdrawn: i128,
     pub cancelled: bool,
     pub receipt_owner: Address,
+    pub is_paused: bool,
+    pub paused_time: u64,
+    pub total_paused_duration: u64,
 }
 
 #[contracttype]

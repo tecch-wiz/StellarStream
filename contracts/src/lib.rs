@@ -123,6 +123,9 @@ impl StellarStreamContract {
             withdrawn: 0,
             cancelled: false,
             receipt_owner: proposal.receiver.clone(),
+            is_paused: false,
+            paused_time: 0,
+            total_paused_duration: 0,
         };
 
         env.storage()
@@ -169,6 +172,9 @@ impl StellarStreamContract {
             withdrawn: 0,
             cancelled: false,
             receipt_owner: receiver.clone(),
+            is_paused: false,
+            paused_time: 0,
+            total_paused_duration: 0,
         };
 
         env.storage()
@@ -179,6 +185,64 @@ impl StellarStreamContract {
         Self::mint_receipt(&env, stream_id, &receiver);
 
         Ok(stream_id)
+    }
+
+    pub fn pause_stream(env: Env, stream_id: u64, caller: Address) -> Result<(), Error> {
+        caller.require_auth();
+
+        let key = (STREAM_COUNT, stream_id);
+        let mut stream: Stream = env
+            .storage()
+            .instance()
+            .get(&key)
+            .ok_or(Error::StreamNotFound)?;
+
+        if stream.sender != caller {
+            return Err(Error::Unauthorized);
+        }
+        if stream.cancelled {
+            return Err(Error::AlreadyCancelled);
+        }
+        if stream.is_paused {
+            return Ok(());
+        }
+
+        stream.is_paused = true;
+        stream.paused_time = env.ledger().timestamp();
+        env.storage().instance().set(&key, &stream);
+
+        Ok(())
+    }
+
+    pub fn unpause_stream(env: Env, stream_id: u64, caller: Address) -> Result<(), Error> {
+        caller.require_auth();
+
+        let key = (STREAM_COUNT, stream_id);
+        let mut stream: Stream = env
+            .storage()
+            .instance()
+            .get(&key)
+            .ok_or(Error::StreamNotFound)?;
+
+        if stream.sender != caller {
+            return Err(Error::Unauthorized);
+        }
+        if stream.cancelled {
+            return Err(Error::AlreadyCancelled);
+        }
+        if !stream.is_paused {
+            return Ok(());
+        }
+
+        let current_time = env.ledger().timestamp();
+        let pause_duration = current_time - stream.paused_time;
+        stream.total_paused_duration += pause_duration;
+        stream.is_paused = false;
+        stream.paused_time = 0;
+
+        env.storage().instance().set(&key, &stream);
+
+        Ok(())
     }
 
     fn mint_receipt(env: &Env, stream_id: u64, owner: &Address) {
@@ -281,6 +345,9 @@ impl StellarStreamContract {
         if stream.cancelled {
             return Err(Error::AlreadyCancelled);
         }
+        if stream.is_paused {
+            return Err(Error::StreamPaused);
+        }
 
         let current_time = env.ledger().timestamp();
         let unlocked = Self::calculate_unlocked(&stream, current_time);
@@ -364,13 +431,27 @@ impl StellarStreamContract {
         if current_time <= stream.start_time {
             return 0;
         }
-        if current_time >= stream.end_time {
+
+        let mut effective_time = current_time;
+        if stream.is_paused {
+            effective_time = stream.paused_time;
+        }
+
+        let adjusted_end = stream.end_time + stream.total_paused_duration;
+        if effective_time >= adjusted_end {
             return stream.total_amount;
         }
 
-        let elapsed = (current_time - stream.start_time) as i128;
+        let elapsed = (effective_time - stream.start_time) as i128;
+        let paused = stream.total_paused_duration as i128;
+        let effective_elapsed = elapsed - paused;
+
+        if effective_elapsed <= 0 {
+            return 0;
+        }
+
         let duration = (stream.end_time - stream.start_time) as i128;
-        (stream.total_amount * elapsed) / duration
+        (stream.total_amount * effective_elapsed) / duration
     }
 }
 
@@ -721,5 +802,103 @@ mod test {
         let result = client.try_approve_proposal(&proposal_id, &approver2);
 
         assert_eq!(result, Err(Ok(Error::ProposalAlreadyExecuted)));
+    }
+
+    #[test]
+    fn test_pause_unpause_stream() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        env.ledger().with_mut(|li| li.timestamp = 100);
+
+        let contract_id = env.register(StellarStreamContract, ());
+        let client = StellarStreamContractClient::new(&env, &contract_id);
+
+        let sender = Address::generate(&env);
+        let receiver = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let (token_id, _) = create_token_contract(&env, &admin);
+
+        let token_admin_client = StellarAssetClient::new(&env, &token_id);
+        token_admin_client.mint(&sender, &10000);
+
+        let stream_id = client.create_stream(&sender, &receiver, &token_id, &1000, &100, &300);
+
+        env.ledger().with_mut(|li| li.timestamp = 150);
+        client.pause_stream(&stream_id, &sender);
+
+        let stream = client.get_stream(&stream_id);
+        assert!(stream.is_paused);
+        assert_eq!(stream.paused_time, 150);
+
+        env.ledger().with_mut(|li| li.timestamp = 200);
+        client.unpause_stream(&stream_id, &sender);
+
+        let stream = client.get_stream(&stream_id);
+        assert!(!stream.is_paused);
+        assert_eq!(stream.total_paused_duration, 50);
+    }
+
+    #[test]
+    fn test_withdraw_paused_fails() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        env.ledger().with_mut(|li| li.timestamp = 100);
+
+        let contract_id = env.register(StellarStreamContract, ());
+        let client = StellarStreamContractClient::new(&env, &contract_id);
+
+        let sender = Address::generate(&env);
+        let receiver = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let (token_id, _) = create_token_contract(&env, &admin);
+
+        let token_admin_client = StellarAssetClient::new(&env, &token_id);
+        token_admin_client.mint(&sender, &10000);
+
+        let stream_id = client.create_stream(&sender, &receiver, &token_id, &1000, &100, &300);
+
+        client.pause_stream(&stream_id, &sender);
+
+        env.ledger().with_mut(|li| li.timestamp = 150);
+        let result = client.try_withdraw(&stream_id, &receiver);
+
+        assert_eq!(result, Err(Ok(Error::StreamPaused)));
+    }
+
+    #[test]
+    fn test_pause_adjusts_unlocked_balance() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        env.ledger().with_mut(|li| li.timestamp = 100);
+
+        let contract_id = env.register(StellarStreamContract, ());
+        let client = StellarStreamContractClient::new(&env, &contract_id);
+
+        let sender = Address::generate(&env);
+        let receiver = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let (token_id, _) = create_token_contract(&env, &admin);
+
+        let token_admin_client = StellarAssetClient::new(&env, &token_id);
+        token_admin_client.mint(&sender, &10000);
+
+        let stream_id = client.create_stream(&sender, &receiver, &token_id, &1000, &100, &300);
+
+        env.ledger().with_mut(|li| li.timestamp = 150);
+        let metadata_before = client.get_receipt_metadata(&stream_id);
+        let unlocked_before = metadata_before.unlocked_balance;
+
+        client.pause_stream(&stream_id, &sender);
+
+        env.ledger().with_mut(|li| li.timestamp = 200);
+        let metadata_paused = client.get_receipt_metadata(&stream_id);
+
+        assert_eq!(metadata_paused.unlocked_balance, unlocked_before);
+
+        client.unpause_stream(&stream_id, &sender);
+
+        env.ledger().with_mut(|li| li.timestamp = 250);
+        let withdrawn = client.withdraw(&stream_id, &receiver);
+        assert!(withdrawn > 0);
     }
 }

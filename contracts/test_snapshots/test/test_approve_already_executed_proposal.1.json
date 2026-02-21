@@ -426,6 +426,22 @@
                             },
                             {
                               "key": {
+                                "symbol": "is_paused"
+                              },
+                              "val": {
+                                "bool": false
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "paused_time"
+                              },
+                              "val": {
+                                "u64": 0
+                              }
+                            },
+                            {
+                              "key": {
                                 "symbol": "receipt_owner"
                               },
                               "val": {
@@ -473,6 +489,14 @@
                                   "hi": 0,
                                   "lo": 1000
                                 }
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "total_paused_duration"
+                              },
+                              "val": {
+                                "u64": 0
                               }
                             },
                             {

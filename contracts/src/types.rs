@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Address, BytesN};
+use soroban_sdk::{contracttype, Address, BytesN, Vec};
 
 // Interest distribution strategies
 // Bits can be combined: e.g., 0b011 = 50% sender, 50% receiver
@@ -13,14 +13,13 @@ pub const INTEREST_SPLIT_SENDER_RECEIVER: u32 = 0b011; // 3: 50/50 sender/receiv
 pub const INTEREST_SPLIT_ALL: u32 = 0b111; // 7: 33/33/33 split
 
 #[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone)]
 pub struct Stream {
     pub sender: Address,
     pub receiver: Address,
     pub token: Address,
-    pub amount: i128, // Original principal amount
+    pub total_amount: i128,
     pub start_time: u64,
-    pub cliff_time: u64,
     pub end_time: u64,
     pub withdrawn_amount: i128,
     pub interest_strategy: u32, // Strategy for interest distribution
@@ -32,15 +31,18 @@ pub struct Stream {
 // Legacy Stream struct (v1) - for migration example
 // This represents an older version without cliff_time
 #[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LegacyStream {
+#[derive(Clone)]
+pub struct StreamProposal {
     pub sender: Address,
     pub receiver: Address,
     pub token: Address,
-    pub amount: i128,
+    pub total_amount: i128,
     pub start_time: u64,
     pub end_time: u64,
-    pub withdrawn_amount: i128,
+    pub approvers: Vec<Address>,
+    pub required_approvals: u32,
+    pub deadline: u64,
+    pub executed: bool,
 }
 
 #[contracttype]

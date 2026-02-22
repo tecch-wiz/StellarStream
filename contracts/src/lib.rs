@@ -3,6 +3,7 @@
 
 mod errors;
 mod math;
+mod oracle;
 mod storage;
 mod types;
 
@@ -169,6 +170,12 @@ impl StellarStreamContract {
             total_paused_duration: 0,
             milestones: Vec::new(env),
             curve_type: CurveType::Linear,
+            is_usd_pegged: false,
+            usd_amount: 0,
+            oracle_address: proposal.sender.clone(),
+            oracle_max_staleness: 0,
+            price_min: 0,
+            price_max: 0,
         };
 
         env.storage()
@@ -265,6 +272,12 @@ impl StellarStreamContract {
             total_paused_duration: 0,
             milestones,
             curve_type,
+            is_usd_pegged: false,
+            usd_amount: 0,
+            oracle_address: sender.clone(),
+            oracle_max_staleness: 0,
+            price_min: 0,
+            price_max: 0,
         };
 
         env.storage()
@@ -280,6 +293,99 @@ impl StellarStreamContract {
                 receiver: receiver.clone(),
                 token,
                 total_amount,
+                start_time,
+                end_time,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+        Self::mint_receipt(&env, stream_id, &receiver);
+
+        Ok(stream_id)
+    }
+
+    pub fn create_usd_pegged_stream(
+        env: Env,
+        sender: Address,
+        receiver: Address,
+        token: Address,
+        usd_amount: i128,
+        start_time: u64,
+        end_time: u64,
+        oracle_address: Address,
+        max_staleness: u64,
+        min_price: i128,
+        max_price: i128,
+    ) -> Result<u64, Error> {
+        sender.require_auth();
+
+        if start_time >= end_time {
+            return Err(Error::InvalidTimeRange);
+        }
+        if usd_amount <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+
+        // Get initial price to calculate deposit amount
+        let price = oracle::get_price(&env, &oracle_address, max_staleness)
+            .map_err(|_| Error::OracleFailed)?;
+
+        // Check price bounds
+        if price < min_price || price > max_price {
+            return Err(Error::PriceOutOfBounds);
+        }
+
+        // Calculate initial token amount
+        let initial_amount =
+            oracle::calculate_token_amount(usd_amount, price).map_err(|_| Error::InvalidAmount)?;
+
+        // Transfer tokens
+        let token_client = token::Client::new(&env, &token);
+        token_client.transfer(&sender, &env.current_contract_address(), &initial_amount);
+
+        let stream_id: u64 = env.storage().instance().get(&STREAM_COUNT).unwrap_or(0);
+        let next_id = stream_id + 1;
+
+        let stream = Stream {
+            sender: sender.clone(),
+            receiver: receiver.clone(),
+            token: token.clone(),
+            total_amount: initial_amount,
+            start_time,
+            end_time,
+            withdrawn_amount: 0,
+            interest_strategy: 0,
+            vault_address: None,
+            deposited_principal: initial_amount,
+            metadata: None,
+            withdrawn: 0,
+            cancelled: false,
+            receipt_owner: receiver.clone(),
+            is_paused: false,
+            paused_time: 0,
+            total_paused_duration: 0,
+            milestones: Vec::new(&env),
+            curve_type: CurveType::Linear,
+            is_usd_pegged: true,
+            usd_amount,
+            oracle_address,
+            oracle_max_staleness: max_staleness,
+            price_min: min_price,
+            price_max: max_price,
+        };
+
+        env.storage()
+            .instance()
+            .set(&(STREAM_COUNT, stream_id), &stream);
+        env.storage().instance().set(&STREAM_COUNT, &next_id);
+
+        env.events().publish(
+            (symbol_short!("create"), sender.clone()),
+            StreamCreatedEvent {
+                stream_id,
+                sender,
+                receiver: receiver.clone(),
+                token,
+                total_amount: initial_amount,
                 start_time,
                 end_time,
                 timestamp: env.ledger().timestamp(),
@@ -485,14 +591,39 @@ impl StellarStreamContract {
         }
 
         let current_time = env.ledger().timestamp();
-        let unlocked = Self::calculate_unlocked(&stream, current_time);
-        let to_withdraw = unlocked - stream.withdrawn_amount;
+
+        // For USD-pegged streams, calculate based on current price
+        let to_withdraw = if stream.is_usd_pegged {
+            // Get current price from oracle
+            let price =
+                oracle::get_price(&env, &stream.oracle_address, stream.oracle_max_staleness)
+                    .map_err(|_| Error::OracleStalePrice)?;
+
+            // Check price bounds
+            if price < stream.price_min || price > stream.price_max {
+                return Err(Error::PriceOutOfBounds);
+            }
+
+            // Calculate unlocked USD amount
+            let unlocked_usd =
+                Self::calculate_unlocked_usd(&stream, current_time, stream.usd_amount);
+
+            // Convert to token amount at current price
+            let unlocked_tokens = oracle::calculate_token_amount(unlocked_usd, price)
+                .map_err(|_| Error::InvalidAmount)?;
+
+            unlocked_tokens - stream.withdrawn_amount
+        } else {
+            // Standard stream
+            let unlocked = Self::calculate_unlocked(&stream, current_time);
+            unlocked - stream.withdrawn_amount
+        };
 
         if to_withdraw <= 0 {
             return Err(Error::InsufficientBalance);
         }
 
-        stream.withdrawn_amount = unlocked;
+        stream.withdrawn_amount += to_withdraw;
         env.storage().instance().set(&key, &stream);
 
         let token_client = token::Client::new(&env, &stream.token);
@@ -652,6 +783,33 @@ impl StellarStreamContract {
         } else {
             milestone_cap
         }
+    }
+
+    fn calculate_unlocked_usd(stream: &Stream, current_time: u64, total_usd: i128) -> i128 {
+        if current_time <= stream.start_time {
+            return 0;
+        }
+
+        let mut effective_time = current_time;
+        if stream.is_paused {
+            effective_time = stream.paused_time;
+        }
+
+        let adjusted_end = stream.end_time + stream.total_paused_duration;
+        if effective_time >= adjusted_end {
+            return total_usd;
+        }
+
+        let elapsed = (effective_time - stream.start_time) as i128;
+        let paused = stream.total_paused_duration as i128;
+        let effective_elapsed = elapsed - paused;
+
+        if effective_elapsed <= 0 {
+            return 0;
+        }
+
+        let duration = (stream.end_time - stream.start_time) as i128;
+        (total_usd * effective_elapsed) / duration
     }
 
     /// Upgrade the contract to a new WASM hash

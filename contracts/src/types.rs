@@ -24,6 +24,22 @@ pub enum CurveType {
 
 #[contracttype]
 #[derive(Clone)]
+pub struct PriceOracle {
+    pub oracle_address: Address,
+    pub max_staleness: u64, // Maximum age of price data in seconds
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct UsdPegConfig {
+    pub usd_amount: i128, // USD amount in 7 decimals (e.g., 5000000000 = $500)
+    pub min_price: i128,  // Minimum acceptable price (slippage protection)
+    pub max_price: i128,  // Maximum acceptable price (slippage protection)
+    pub oracle: PriceOracle,
+}
+
+#[contracttype]
+#[derive(Clone)]
 pub struct Milestone {
     pub timestamp: u64,
     pub percentage: u32,
@@ -47,10 +63,16 @@ pub struct Stream {
     pub total_paused_duration: u64,
     pub milestones: Vec<Milestone>,
     pub curve_type: CurveType,
-    pub interest_strategy: u32, // Strategy for interest distribution
-    pub vault_address: Option<Address>, // Optional vault for yield generation
-    pub deposited_principal: i128, // Amount deposited in vault (for tracking)
-    pub metadata: Option<BytesN<32>>, // Optional fixed-size off-chain reference
+    pub interest_strategy: u32,
+    pub vault_address: Option<Address>,
+    pub deposited_principal: i128,
+    pub metadata: Option<BytesN<32>>,
+    pub is_usd_pegged: bool,
+    pub usd_amount: i128,
+    pub oracle_address: Address,
+    pub oracle_max_staleness: u64,
+    pub price_min: i128,
+    pub price_max: i128,
 }
 
 // Legacy Stream struct (v1) - for migration example

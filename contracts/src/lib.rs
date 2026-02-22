@@ -1368,4 +1368,34 @@ mod test {
         client.approve_proposal(&proposal_id, &approver2);
         // Event verification would be done through event monitoring in integration tests
     }
+
+    /// Upgrade the contract to a new WASM hash
+    /// Only the admin can perform this operation
+    pub fn upgrade(env: Env, new_wasm_hash: soroban_sdk::BytesN<32>) {
+        // Get the admin address
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Admin not set");
+
+        // Require admin authorization
+        admin.require_auth();
+
+        // Update the contract WASM
+        env.deployer()
+            .update_current_contract_wasm(new_wasm_hash.clone());
+
+        // Emit upgrade event with new WASM hash
+        env.events()
+            .publish((symbol_short!("upgrade"), admin), new_wasm_hash);
+    }
+
+    /// Get the current admin address
+    pub fn get_admin(env: Env) -> Address {
+        env.storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Admin not set")
+    }
 }

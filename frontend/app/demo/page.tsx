@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { StellarAddressInput } from '@/components/stellar-address-input';
+import NetworkStatusOrb from '@/components/networkstatusorb';
 
 export default function DemoPage() {
   const [address, setAddress] = useState('');
@@ -79,6 +80,20 @@ export default function DemoPage() {
             <li>Clear, contextual error messages</li>
             <li>Debounced validation for better UX</li>
           </ul>
+        </div>
+
+        {/* network status orb demo */}
+        <div className="glass-card p-8 space-y-4 text-center">
+          <h2 className="text-xl font-semibold text-white">Network Status Orb</h2>
+          <p className="text-white/60 text-sm">
+            Shows current network congestion (green/yellow/red) and average
+            transaction fee. Hover for details.
+          </p>
+          <div className="mt-4 flex items-center justify-center gap-4">
+            <NetworkStatusOrb congestionLevel={0.12} averageFee={0.0012} size={30} />
+            <NetworkStatusOrb congestionLevel={0.5} averageFee={0.005} size={30} />
+            <NetworkStatusOrb congestionLevel={0.9} averageFee={0.02} size={30} />
+          </div>
         </div>
       </div>
     </div>

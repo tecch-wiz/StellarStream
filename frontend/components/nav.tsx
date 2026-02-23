@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useWallet } from "@/lib/wallet-context";
 import { WalletConnectModal } from "./wallet-connect-modal";
+import NetworkStatusOrb from "./networkstatusorb";
 import { Wallet, ChevronDown } from "lucide-react";
 
 const navLinks = [
@@ -43,6 +44,11 @@ export function Nav() {
               </li>
             ))}
           </ul>
+
+          {/* network status orb (desktop only) */}
+          <div className="hidden md:flex items-center mr-6">
+            <NetworkStatusOrb congestionLevel={0.2} averageFee={0.001} size={16} />
+          </div>
 
           {/* Wallet Connection Button */}
           {isConnected ? (

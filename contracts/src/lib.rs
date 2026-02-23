@@ -11,6 +11,8 @@ mod vault;
 mod voting;
 
 #[cfg(test)]
+mod clawback_test;
+#[cfg(test)]
 mod soulbound_test;
 #[cfg(test)]
 mod vault_test;
@@ -21,10 +23,11 @@ use errors::Error;
 use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Vec};
 use storage::{PROPOSAL_COUNT, RECEIPT, STREAM_COUNT};
 use types::{
-    ContributorRequest, CurveType, DataKey, Milestone, ProposalApprovedEvent, ProposalCreatedEvent,
-    ReceiptMetadata, ReceiptTransferredEvent, RequestCreatedEvent, RequestExecutedEvent,
-    RequestKey, RequestStatus, Role, Stream, StreamCancelledEvent, StreamClaimEvent,
-    StreamCreatedEvent, StreamPausedEvent, StreamProposal, StreamReceipt, StreamUnpausedEvent,
+    ClawbackEvent, ContributorRequest, CurveType, DataKey, Milestone, ProposalApprovedEvent,
+    ProposalCreatedEvent, ReceiptMetadata, ReceiptTransferredEvent, RequestCreatedEvent,
+    RequestExecutedEvent, RequestKey, RequestStatus, Role, Stream, StreamCancelledEvent,
+    StreamClaimEvent, StreamCreatedEvent, StreamPausedEvent, StreamProposal, StreamReceipt,
+    StreamUnpausedEvent,
 };
 
 #[contract]
@@ -190,7 +193,8 @@ impl StellarStreamContract {
             oracle_max_staleness: 0,
             price_min: 0,
             price_max: 0,
-            is_soulbound: false, // Proposals default to non-soulbound
+            is_soulbound: false,     // Proposals default to non-soulbound
+            clawback_enabled: false, // Check at runtime if needed
         };
 
         env.storage()
@@ -330,6 +334,7 @@ impl StellarStreamContract {
             price_min: 0,
             price_max: 0,
             is_soulbound,
+            clawback_enabled: false, // TODO: Check token flags
         };
 
         env.storage()
@@ -453,6 +458,7 @@ impl StellarStreamContract {
             price_min: min_price,
             price_max: max_price,
             is_soulbound: false, // USD-pegged streams default to non-soulbound
+            clawback_enabled: false,
         };
 
         env.storage()
@@ -881,6 +887,73 @@ impl StellarStreamContract {
                 to_receiver,
                 to_sender,
                 timestamp: current_time,
+            },
+        );
+
+        Ok(())
+    }
+
+    /// Regulatory clawback - Compliance Officer can revoke stream funds
+    /// Only works if asset has clawback enabled
+    pub fn governance_clawback(
+        env: Env,
+        stream_id: u64,
+        officer: Address,
+        issuer: Address,
+        reason: Option<soroban_sdk::BytesN<32>>,
+    ) -> Result<(), Error> {
+        officer.require_auth();
+
+        // Check if caller has ComplianceOfficer role
+        if !Self::has_role(&env, &officer, types::Role::ComplianceOfficer) {
+            return Err(Error::Unauthorized);
+        }
+
+        let key = (STREAM_COUNT, stream_id);
+        let mut stream: Stream = env
+            .storage()
+            .instance()
+            .get(&key)
+            .ok_or(Error::StreamNotFound)?;
+
+        if stream.cancelled {
+            return Err(Error::AlreadyCancelled);
+        }
+
+        // Mark as cancelled
+        stream.cancelled = true;
+        let remaining_balance = stream.total_amount - stream.withdrawn_amount;
+
+        // Withdraw from vault if applicable
+        if let Some(ref vault) = stream.vault_address {
+            let shares = Self::get_vault_shares(env.clone(), stream_id);
+            if shares > 0 {
+                vault::withdraw_from_vault(&env, vault, shares)
+                    .map_err(|_| Error::InsufficientBalance)?;
+                env.storage()
+                    .instance()
+                    .set(&DataKey::VaultShares(stream_id), &0_i128);
+            }
+        }
+
+        env.storage().instance().set(&key, &stream);
+
+        // Transfer all remaining funds to issuer
+        if remaining_balance > 0 {
+            let token_client = token::Client::new(&env, &stream.token);
+            token_client.transfer(&env.current_contract_address(), &issuer, &remaining_balance);
+        }
+
+        // Emit high-priority clawback event
+        env.events().publish(
+            (symbol_short!("CLAWBACK"), symbol_short!("SECURITY")),
+            ClawbackEvent {
+                stream_id,
+                officer: officer.clone(),
+                amount_clawed: remaining_balance,
+                issuer: issuer.clone(),
+                reason,
+                timestamp: env.ledger().timestamp(),
             },
         );
 

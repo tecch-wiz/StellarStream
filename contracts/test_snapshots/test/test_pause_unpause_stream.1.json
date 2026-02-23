@@ -328,6 +328,14 @@
                             },
                             {
                               "key": {
+                                "symbol": "clawback_enabled"
+                              },
+                              "val": {
+                                "bool": false
+                              }
+                            },
+                            {
+                              "key": {
                                 "symbol": "curve_type"
                               },
                               "val": {

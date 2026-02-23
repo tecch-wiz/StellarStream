@@ -543,6 +543,14 @@
                             },
                             {
                               "key": {
+                                "symbol": "clawback_enabled"
+                              },
+                              "val": {
+                                "bool": false
+                              }
+                            },
+                            {
+                              "key": {
                                 "symbol": "curve_type"
                               },
                               "val": {
@@ -784,6 +792,14 @@
                             },
                             {
                               "key": {
+                                "symbol": "clawback_enabled"
+                              },
+                              "val": {
+                                "bool": false
+                              }
+                            },
+                            {
+                              "key": {
                                 "symbol": "curve_type"
                               },
                               "val": {
@@ -1018,6 +1034,14 @@
                             {
                               "key": {
                                 "symbol": "cancelled"
+                              },
+                              "val": {
+                                "bool": false
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "clawback_enabled"
                               },
                               "val": {
                                 "bool": false

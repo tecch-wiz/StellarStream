@@ -27,9 +27,10 @@ pub enum CurveType {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Role {
-    Admin,           // Can grant/revoke roles, upgrade contract
-    Pauser,          // Can pause/unpause contract
-    TreasuryManager, // Can update fees and treasury address
+    Admin,             // Can grant/revoke roles, upgrade contract
+    Pauser,            // Can pause/unpause contract
+    TreasuryManager,   // Can update fees and treasury address
+    ComplianceOfficer, // Can execute regulatory clawbacks
 }
 
 #[contracttype]
@@ -90,6 +91,8 @@ pub struct Stream {
     /// Note: We use bool instead of Option<bool> to avoid storage overhead and
     /// ensure explicit default behavior. All existing streams default to false.
     pub is_soulbound: bool,
+    /// If true, asset has clawback enabled and can be revoked by issuer
+    pub clawback_enabled: bool,
 }
 
 // Legacy Stream struct (v1) - for migration example
@@ -188,6 +191,17 @@ pub struct StreamCancelledEvent {
     pub canceller: Address,
     pub to_receiver: i128,
     pub to_sender: i128,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ClawbackEvent {
+    pub stream_id: u64,
+    pub officer: Address,
+    pub amount_clawed: i128,
+    pub issuer: Address,
+    pub reason: Option<BytesN<32>>,
     pub timestamp: u64,
 }
 

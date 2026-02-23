@@ -397,6 +397,12 @@
                           "map": [
                             {
                               "key": {
+                                "symbol": "arbiter"
+                              },
+                              "val": "void"
+                            },
+                            {
+                              "key": {
                                 "symbol": "cancelled"
                               },
                               "val": {
@@ -444,6 +450,14 @@
                               },
                               "val": {
                                 "u32": 0
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "is_frozen"
+                              },
+                              "val": {
+                                "bool": false
                               }
                             },
                             {

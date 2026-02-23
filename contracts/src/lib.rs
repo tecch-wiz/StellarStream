@@ -13,6 +13,8 @@ mod voting;
 #[cfg(test)]
 mod clawback_test;
 #[cfg(test)]
+mod dispute_test;
+#[cfg(test)]
 mod soulbound_test;
 #[cfg(test)]
 mod vault_test;
@@ -195,6 +197,8 @@ impl StellarStreamContract {
             price_max: 0,
             is_soulbound: false,     // Proposals default to non-soulbound
             clawback_enabled: false, // Check at runtime if needed
+            arbiter: None,
+            is_frozen: false,
         };
 
         env.storage()
@@ -335,6 +339,8 @@ impl StellarStreamContract {
             price_max: 0,
             is_soulbound,
             clawback_enabled: false, // TODO: Check token flags
+            arbiter: None,
+            is_frozen: false,
         };
 
         env.storage()
@@ -459,6 +465,8 @@ impl StellarStreamContract {
             price_max: max_price,
             is_soulbound: false, // USD-pegged streams default to non-soulbound
             clawback_enabled: false,
+            arbiter: None,
+            is_frozen: false,
         };
 
         env.storage()
@@ -740,6 +748,9 @@ impl StellarStreamContract {
         if stream.is_paused {
             return Err(Error::StreamPaused);
         }
+        if stream.is_frozen {
+            return Err(Error::StreamFrozen);
+        }
 
         let current_time = env.ledger().timestamp();
 
@@ -953,6 +964,155 @@ impl StellarStreamContract {
                 amount_clawed: remaining_balance,
                 issuer: issuer.clone(),
                 reason,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+
+        Ok(())
+    }
+
+    // ========== Dispute Resolution Functions ==========
+
+    /// Set arbiter for dispute resolution (sender only, before disputes)
+    pub fn set_arbiter(
+        env: Env,
+        stream_id: u64,
+        sender: Address,
+        arbiter: Address,
+    ) -> Result<(), Error> {
+        sender.require_auth();
+
+        let key = (STREAM_COUNT, stream_id);
+        let mut stream: Stream = env
+            .storage()
+            .instance()
+            .get(&key)
+            .ok_or(Error::StreamNotFound)?;
+
+        // Only sender can set arbiter
+        if stream.sender != sender {
+            return Err(Error::Unauthorized);
+        }
+
+        if stream.cancelled {
+            return Err(Error::AlreadyCancelled);
+        }
+
+        stream.arbiter = Some(arbiter);
+        env.storage().instance().set(&key, &stream);
+
+        Ok(())
+    }
+
+    /// Freeze stream pending dispute resolution (Arbiter only)
+    pub fn freeze_stream(env: Env, stream_id: u64, arbiter: Address) -> Result<(), Error> {
+        arbiter.require_auth();
+
+        let key = (STREAM_COUNT, stream_id);
+        let mut stream: Stream = env
+            .storage()
+            .instance()
+            .get(&key)
+            .ok_or(Error::StreamNotFound)?;
+
+        // Verify caller is the designated arbiter
+        if stream.arbiter.is_none() || stream.arbiter.as_ref().unwrap() != &arbiter {
+            return Err(Error::Unauthorized);
+        }
+
+        if stream.cancelled {
+            return Err(Error::AlreadyCancelled);
+        }
+
+        stream.is_frozen = true;
+        env.storage().instance().set(&key, &stream);
+
+        // Emit freeze event
+        env.events().publish(
+            (symbol_short!("freeze"), stream_id),
+            types::StreamFrozenEvent {
+                stream_id,
+                arbiter,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+
+        Ok(())
+    }
+
+    /// Resolve dispute and split funds (Arbiter only)
+    /// split_percentage: 0-10000 (basis points) to receiver, rest to sender
+    pub fn resolve_dispute(
+        env: Env,
+        stream_id: u64,
+        arbiter: Address,
+        split_percentage: u32,
+    ) -> Result<(), Error> {
+        arbiter.require_auth();
+
+        if split_percentage > 10000 {
+            return Err(Error::InvalidAmount);
+        }
+
+        let key = (STREAM_COUNT, stream_id);
+        let mut stream: Stream = env
+            .storage()
+            .instance()
+            .get(&key)
+            .ok_or(Error::StreamNotFound)?;
+
+        // Verify caller is the designated arbiter
+        if stream.arbiter.is_none() || stream.arbiter.as_ref().unwrap() != &arbiter {
+            return Err(Error::Unauthorized);
+        }
+
+        if stream.cancelled {
+            return Err(Error::AlreadyCancelled);
+        }
+
+        let remaining_balance = stream.total_amount - stream.withdrawn_amount;
+
+        // Calculate split
+        let to_receiver = (remaining_balance * split_percentage as i128) / 10000;
+        let to_sender = remaining_balance - to_receiver;
+
+        // Withdraw from vault if applicable
+        if let Some(ref vault) = stream.vault_address {
+            let shares = Self::get_vault_shares(env.clone(), stream_id);
+            if shares > 0 {
+                vault::withdraw_from_vault(&env, vault, shares)
+                    .map_err(|_| Error::InsufficientBalance)?;
+                env.storage()
+                    .instance()
+                    .set(&DataKey::VaultShares(stream_id), &0_i128);
+            }
+        }
+
+        // Mark as cancelled
+        stream.cancelled = true;
+        env.storage().instance().set(&key, &stream);
+
+        // Transfer funds
+        let token_client = token::Client::new(&env, &stream.token);
+        if to_receiver > 0 {
+            token_client.transfer(
+                &env.current_contract_address(),
+                &stream.receiver,
+                &to_receiver,
+            );
+        }
+        if to_sender > 0 {
+            token_client.transfer(&env.current_contract_address(), &stream.sender, &to_sender);
+        }
+
+        // Emit resolution event
+        env.events().publish(
+            (symbol_short!("resolve"), stream_id),
+            types::DisputeResolvedEvent {
+                stream_id,
+                arbiter,
+                to_sender,
+                to_receiver,
                 timestamp: env.ledger().timestamp(),
             },
         );

@@ -93,6 +93,10 @@ pub struct Stream {
     pub is_soulbound: bool,
     /// If true, asset has clawback enabled and can be revoked by issuer
     pub clawback_enabled: bool,
+    /// Optional arbiter for dispute resolution
+    pub arbiter: Option<Address>,
+    /// If true, stream is frozen pending dispute resolution
+    pub is_frozen: bool,
 }
 
 // Legacy Stream struct (v1) - for migration example
@@ -202,6 +206,24 @@ pub struct ClawbackEvent {
     pub amount_clawed: i128,
     pub issuer: Address,
     pub reason: Option<BytesN<32>>,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct StreamFrozenEvent {
+    pub stream_id: u64,
+    pub arbiter: Address,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct DisputeResolvedEvent {
+    pub stream_id: u64,
+    pub arbiter: Address,
+    pub to_sender: i128,
+    pub to_receiver: i128,
     pub timestamp: u64,
 }
 

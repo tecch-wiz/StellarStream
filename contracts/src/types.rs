@@ -240,3 +240,51 @@ pub struct ReceiptMetadata {
     pub total_amount: i128,
     pub token: Address,
 }
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RequestStatus {
+    Pending,
+    Approved,
+    Rejected,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContributorRequest {
+    pub id: u64,
+    pub receiver: Address,
+    pub token: Address,
+    pub total_amount: i128,
+    pub duration: u64,
+    pub start_time: u64,
+    pub status: RequestStatus,
+    pub metadata: Option<BytesN<32>>,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RequestKey {
+    Request(u64),
+    RequestCount,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct RequestCreatedEvent {
+    pub request_id: u64,
+    pub receiver: Address,
+    pub token: Address,
+    pub total_amount: i128,
+    pub duration: u64,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct RequestExecutedEvent {
+    pub request_id: u64,
+    pub stream_id: u64,
+    pub executor: Address,
+    pub timestamp: u64,
+}

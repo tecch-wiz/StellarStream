@@ -12,6 +12,7 @@ use errors::Error;
 use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Vec};
 use storage::{PROPOSAL_COUNT, RECEIPT, STREAM_COUNT};
 use types::{
+    ContributorRequest, RequestCreatedEvent, RequestExecutedEvent, RequestKey, RequestStatus,
     CurveType, DataKey, Milestone, ProposalApprovedEvent, ProposalCreatedEvent, ReceiptMetadata,
     ReceiptTransferredEvent, Role, Stream, StreamCancelledEvent, StreamClaimEvent,
     StreamCreatedEvent, StreamPausedEvent, StreamProposal, StreamReceipt, StreamUnpausedEvent,
@@ -892,6 +893,87 @@ impl StellarStreamContract {
             .instance()
             .get(&DataKey::Admin)
             .expect("Admin not set")
+    }
+
+    // --- CONTRIBUTOR PULL-REQUEST PAYMENTS ---
+
+    pub fn create_request(
+        env: Env,
+        receiver: Address,
+        token: Address,
+        total_amount: i128,
+        duration: u64,
+        metadata: Option<soroban_sdk::BytesN<32>>,
+    ) -> u64 {
+        receiver.require_auth();
+        let count: u64 = env.storage().instance().get(&RequestKey::RequestCount).unwrap_or(0);
+        let request_id = count + 1;
+        let now = env.ledger().timestamp();
+        let request = ContributorRequest {
+            id: request_id,
+            receiver: receiver.clone(),
+            token: token.clone(),
+            total_amount,
+            duration,
+            start_time: now,
+            status: RequestStatus::Pending,
+            metadata,
+        };
+        env.storage().instance().set(&RequestKey::Request(request_id), &request);
+        env.storage().instance().set(&RequestKey::RequestCount, &request_id);
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "RequestCreated"), request_id),
+            RequestCreatedEvent {
+                request_id,
+                receiver,
+                token,
+                total_amount,
+                duration,
+                timestamp: now,
+            },
+        );
+        request_id
+    }
+
+    pub fn execute_request(env: Env, admin: Address, request_id: u64) -> Result<u64, Error> {
+        admin.require_auth();
+        if !Self::has_role(&env, &admin, Role::Admin) {
+            return Err(Error::Unauthorized);
+        }
+        let mut request: ContributorRequest = env
+            .storage()
+            .instance()
+            .get(&RequestKey::Request(request_id))
+            .ok_or(Error::StreamNotFound)?;
+        if request.status != RequestStatus::Pending {
+            return Err(Error::AlreadyExecuted);
+        }
+        request.status = RequestStatus::Approved;
+        env.storage().instance().set(&RequestKey::Request(request_id), &request);
+        let stream_id = Self::create_stream(
+            env.clone(),
+            admin.clone(),
+            request.receiver.clone(),
+            request.token.clone(),
+            request.total_amount,
+            request.start_time,
+            request.start_time + request.duration,
+            CurveType::Linear,
+        )?;
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "RequestExecuted"), request_id),
+            RequestExecutedEvent {
+                request_id,
+                stream_id,
+                executor: admin,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+        Ok(stream_id)
+    }
+
+    pub fn get_request(env: Env, request_id: u64) -> Option<ContributorRequest> {
+        env.storage().instance().get(&RequestKey::Request(request_id))
     }
 }
 

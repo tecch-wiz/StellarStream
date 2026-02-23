@@ -147,6 +147,7 @@ pub enum DataKey {
     SoulboundStreams,       // Vec<u64> of all soulbound stream IDs
     ApprovedVaults,         // Vec<Address> of approved lending vaults
     VaultShares(u64),       // Vault shares for stream_id
+    VotingDelegate(u64),    // Voting delegate for stream_id
 }
 
 #[contracttype]

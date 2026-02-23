@@ -8,11 +8,14 @@ mod oracle;
 mod storage;
 mod types;
 mod vault;
+mod voting;
 
 #[cfg(test)]
 mod soulbound_test;
 #[cfg(test)]
 mod vault_test;
+#[cfg(test)]
+mod voting_test;
 
 use errors::Error;
 use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Vec};
@@ -1147,6 +1150,73 @@ impl StellarStreamContract {
             .instance()
             .get(&DataKey::VaultShares(stream_id))
             .unwrap_or(0)
+    }
+
+    // ========== Voting & Governance Functions ==========
+
+    /// Get voting power for a stream (unlocked balance)
+    pub fn get_voting_power(env: Env, stream_id: u64) -> i128 {
+        let stream: Stream = env
+            .storage()
+            .instance()
+            .get(&(STREAM_COUNT, stream_id))
+            .unwrap_or_else(|| panic!("Stream not found"));
+
+        let current_time = env.ledger().timestamp();
+        voting::get_voting_power(&env, &stream, current_time)
+    }
+
+    /// Get total balance in stream (locked + unlocked)
+    pub fn get_total_stream_balance(env: Env, stream_id: u64) -> i128 {
+        let stream: Stream = env
+            .storage()
+            .instance()
+            .get(&(STREAM_COUNT, stream_id))
+            .unwrap_or_else(|| panic!("Stream not found"));
+
+        voting::get_total_balance(&stream)
+    }
+
+    /// Delegate voting power to another address
+    pub fn delegate_voting_power(env: Env, stream_id: u64, caller: Address, delegate: Address) {
+        caller.require_auth();
+
+        // Verify caller is receipt owner
+        if !voting::can_delegate(&env, stream_id, &caller) {
+            panic!("Not receipt owner");
+        }
+
+        // Store delegation
+        env.storage()
+            .instance()
+            .set(&DataKey::VotingDelegate(stream_id), &delegate);
+
+        // Emit event
+        env.events()
+            .publish((symbol_short!("delegate"), stream_id), (caller, delegate));
+    }
+
+    /// Get voting delegate for a stream
+    pub fn get_voting_delegate(env: Env, stream_id: u64) -> Option<Address> {
+        env.storage()
+            .instance()
+            .get(&DataKey::VotingDelegate(stream_id))
+    }
+
+    /// Get voting power for a delegate across all streams
+    pub fn get_delegated_voting_power(env: Env, delegate: Address) -> i128 {
+        let stream_count: u64 = env.storage().instance().get(&STREAM_COUNT).unwrap_or(0);
+        let mut total_power = 0i128;
+
+        for stream_id in 0..stream_count {
+            if let Some(delegated_to) = Self::get_voting_delegate(env.clone(), stream_id) {
+                if delegated_to == delegate {
+                    total_power += Self::get_voting_power(env.clone(), stream_id);
+                }
+            }
+        }
+
+        total_power
     }
 
     /// Get the current admin address (for backward compatibility)

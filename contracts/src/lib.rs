@@ -989,6 +989,13 @@ impl StellarStreamContract {
     }
 }
 
+// Contract metadata for explorer display (Stellar.Expert, etc.)
+soroban_sdk::contractmeta!(
+    desc = "StellarStream: Token streaming with multi-sig proposals, dynamic vesting curves (linear/exponential), yield optimization, and OFAC compliance. Create, manage, and withdraw from streams with flexible approval workflows.",
+    version = "0.1.0",
+    name = "StellarStream"
+);
+
 #[cfg(test)]
 mod test {
     use super::*;

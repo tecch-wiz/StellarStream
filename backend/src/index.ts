@@ -51,7 +51,7 @@ const allowedOrigins = process.env.FRONTEND_URL
   : ['http://localhost:5173'];
 
 app.use(cors({
-  origin: (origin, callback) => {
+  origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
     // Allow requests with no origin (like mobile apps or curl requests)
     if (!origin) return callback(null, true);
     
@@ -104,8 +104,16 @@ authRouter.get('/nonce', rateLimitMiddleware, getNonce);
 authRouter.get('/me', rateLimitMiddleware, requireWalletAuth, getMe);
 app.use('/api/v1/auth', authRouter);
 
+app.use(batchRoutes);
+app.use(healthRoutes);
+
 async function start(): Promise<void> {
   await ensureRedis();
+  
+  // Batch metadata endpoint for bulk streaming queries
+  app.use(batchRoutes);
+  app.use(healthRoutes);
+  
   app.listen(PORT, () => {
     console.log(`🚀 Server is running on port ${PORT}`);
   });
